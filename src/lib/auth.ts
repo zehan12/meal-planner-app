@@ -1,59 +1,65 @@
-import db from "@/lib/db";
-import { comparePassword, toNumberSafe, toStringSafe } from "@/lib/utils";
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+// auth.ts
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import db from "@/lib/db";
+import { comparePassword, toStringSafe } from "@/lib/utils";
 import { signInSchema } from "@/app/(auth)/sign-in/_types/signInSchema";
-import { JWT } from "next-auth/jwt";
 
+// ----- Type augmentation -----
 declare module "next-auth" {
   interface User {
+    id: string;
     name?: string | null;
+    email?: string | null;
     role?: string | null;
+  }
+  interface Session {
+    user: {
+      id: string;
+      name?: string | null;
+      email?: string | null;
+      role?: string | null;
+    };
   }
 }
 
 declare module "next-auth/jwt" {
   interface JWT {
+    id?: string;                // keep as string for consistency
     name?: string | null;
+    email?: string | null;
     role?: string | null;
   }
 }
 
+// ----- Auth config -----
 export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
     Credentials({
+      // Helps with type inference in some editors, optional keys ok
       credentials: {
-        email: {},
-        password: {},
+        email: { label: "Email", type: "text" },
+        password: { label: "Password", type: "password" },
       },
       authorize: async (credentials) => {
-        if (!credentials?.email || !credentials?.password) {
+        // Validate with Zod
+        const parsed = signInSchema.safeParse(credentials);
+        if (!parsed.success) {
           throw new Error("Email and password are required");
         }
+        const { email, password } = parsed.data;
 
-        const validatedCredentials = signInSchema.parse(credentials);
-
-        const user = await db.user.findUnique({
-          where: {
-            email: validatedCredentials.email,
-          },
-        });
-
+        const user = await db.user.findUnique({ where: { email } });
         if (!user) {
           throw new Error("Invalid email or password");
         }
 
-        const isPasswordValid = await comparePassword(
-          validatedCredentials.password,
-          user.password,
-        );
-
-        if (!isPasswordValid) {
+        const isValid = await comparePassword(password, user.password);
+        if (!isValid) {
           throw new Error("Invalid email or password");
         }
 
+        // Return a User-like object (NextAuth will serialize to JWT)
         return {
           id: toStringSafe(user.id),
           email: user.email,
@@ -63,30 +69,33 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       },
     }),
   ],
+
   pages: {
     signIn: "/sign-in",
   },
 
   callbacks: {
+    // Runs on sign in and on subsequent requests
     jwt({ token, user }) {
-      const clonedToken = token;
+      // When a user signs in, persist extra fields onto the token
       if (user) {
-        clonedToken.id = toNumberSafe(user.id);
-        clonedToken.name = user?.name;
-        clonedToken.role = user?.role;
+        token.id = toStringSafe(user.id);
+        token.name = user.name ?? null;
+        token.email = user.email ?? null;
+        token.role = user.role ?? null;
       }
-      return clonedToken;
+      return token;
     },
+
     session({ session, token }) {
-      const clonedSession = session;
-
-      if (clonedSession.user) {
-        clonedSession.user.id = toStringSafe(token.id);
-        clonedSession.user.name = token.name;
-        clonedSession.user.role = token.role;
+      // Mirror token fields to session.user
+      if (session.user) {
+        session.user.id = toStringSafe(token.id ?? "");
+        session.user.name = token.name ?? null;
+        session.user.email = token.email ?? null;
+        session.user.role = token.role ?? null;
       }
-
-      return clonedSession;
+      return session;
     },
   },
 });
